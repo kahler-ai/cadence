@@ -28,6 +28,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/cadence/.gen/go/shared"
+
+	"github.com/uber/cadence/common/clock"
+
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/mock"
@@ -160,7 +164,7 @@ func (s *resetorSuite) SetupTest() {
 	}
 	h.txProcessor = newTransferQueueProcessor(mockShard, h, s.mockVisibilityMgr, s.mockProducer, s.mockMatchingClient, s.mockHistoryClient, s.logger)
 	h.timerProcessor = newTimerQueueProcessor(mockShard, h, s.mockMatchingClient, s.mockProducer, s.logger)
-	repl := newHistoryReplicator(mockShard, h, historyCache, s.mockDomainCache, s.mockHistoryMgr, s.mockHistoryV2Mgr, s.logger)
+	repl := newHistoryReplicator(mockShard, clock.NewEventTimeSource(), h, historyCache, s.mockDomainCache, s.mockHistoryMgr, s.mockHistoryV2Mgr, s.logger)
 	s.resetor = newWorkflowResetor(h, repl)
 	h.resetor = s.resetor
 	s.historyEngine = h
@@ -2733,7 +2737,7 @@ func (s *resetorSuite) TestResetWorkflowExecution_Replication_NotActive() {
 	s.mockEventsCache.On("putEvent", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Once()
 
 	_, err = s.historyEngine.ResetWorkflowExecution(context.Background(), request)
-	s.EqualError(err, "DomainNotActiveError{Message: Domain: testDomainName is active in cluster: standby, while current cluster active is a standby cluster., DomainName: testDomainName, CurrentCluster: active, ActiveCluster: standby}")
+	s.IsType(&shared.DomainNotActiveError{}, err)
 }
 
 func (s *resetorSuite) TestResetWorkflowExecution_Replication_NoTerminatingCurrent() {

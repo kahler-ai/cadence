@@ -14766,6 +14766,190 @@ func (v *EntityNotExistsError) Error() string {
 	return v.String()
 }
 
+type EventReapplyPolicy int32
+
+const (
+	EventReapplyPolicyAlways    EventReapplyPolicy = 0
+	EventReapplyPolicyIfRunning EventReapplyPolicy = 1
+	EventReapplyPolicyNever     EventReapplyPolicy = 2
+)
+
+// EventReapplyPolicy_Values returns all recognized values of EventReapplyPolicy.
+func EventReapplyPolicy_Values() []EventReapplyPolicy {
+	return []EventReapplyPolicy{
+		EventReapplyPolicyAlways,
+		EventReapplyPolicyIfRunning,
+		EventReapplyPolicyNever,
+	}
+}
+
+// UnmarshalText tries to decode EventReapplyPolicy from a byte slice
+// containing its name.
+//
+//   var v EventReapplyPolicy
+//   err := v.UnmarshalText([]byte("ALWAYS"))
+func (v *EventReapplyPolicy) UnmarshalText(value []byte) error {
+	switch s := string(value); s {
+	case "ALWAYS":
+		*v = EventReapplyPolicyAlways
+		return nil
+	case "IF_RUNNING":
+		*v = EventReapplyPolicyIfRunning
+		return nil
+	case "NEVER":
+		*v = EventReapplyPolicyNever
+		return nil
+	default:
+		val, err := strconv.ParseInt(s, 10, 32)
+		if err != nil {
+			return fmt.Errorf("unknown enum value %q for %q: %v", s, "EventReapplyPolicy", err)
+		}
+		*v = EventReapplyPolicy(val)
+		return nil
+	}
+}
+
+// MarshalText encodes EventReapplyPolicy to text.
+//
+// If the enum value is recognized, its name is returned. Otherwise,
+// its integer value is returned.
+//
+// This implements the TextMarshaler interface.
+func (v EventReapplyPolicy) MarshalText() ([]byte, error) {
+	switch int32(v) {
+	case 0:
+		return []byte("ALWAYS"), nil
+	case 1:
+		return []byte("IF_RUNNING"), nil
+	case 2:
+		return []byte("NEVER"), nil
+	}
+	return []byte(strconv.FormatInt(int64(v), 10)), nil
+}
+
+// MarshalLogObject implements zapcore.ObjectMarshaler, enabling
+// fast logging of EventReapplyPolicy.
+// Enums are logged as objects, where the value is logged with key "value", and
+// if this value's name is known, the name is logged with key "name".
+func (v EventReapplyPolicy) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddInt32("value", int32(v))
+	switch int32(v) {
+	case 0:
+		enc.AddString("name", "ALWAYS")
+	case 1:
+		enc.AddString("name", "IF_RUNNING")
+	case 2:
+		enc.AddString("name", "NEVER")
+	}
+	return nil
+}
+
+// Ptr returns a pointer to this enum value.
+func (v EventReapplyPolicy) Ptr() *EventReapplyPolicy {
+	return &v
+}
+
+// ToWire translates EventReapplyPolicy into a Thrift-level intermediate
+// representation. This intermediate representation may be serialized
+// into bytes using a ThriftRW protocol implementation.
+//
+// Enums are represented as 32-bit integers over the wire.
+func (v EventReapplyPolicy) ToWire() (wire.Value, error) {
+	return wire.NewValueI32(int32(v)), nil
+}
+
+// FromWire deserializes EventReapplyPolicy from its Thrift-level
+// representation.
+//
+//   x, err := binaryProtocol.Decode(reader, wire.TI32)
+//   if err != nil {
+//     return EventReapplyPolicy(0), err
+//   }
+//
+//   var v EventReapplyPolicy
+//   if err := v.FromWire(x); err != nil {
+//     return EventReapplyPolicy(0), err
+//   }
+//   return v, nil
+func (v *EventReapplyPolicy) FromWire(w wire.Value) error {
+	*v = (EventReapplyPolicy)(w.GetI32())
+	return nil
+}
+
+// String returns a readable string representation of EventReapplyPolicy.
+func (v EventReapplyPolicy) String() string {
+	w := int32(v)
+	switch w {
+	case 0:
+		return "ALWAYS"
+	case 1:
+		return "IF_RUNNING"
+	case 2:
+		return "NEVER"
+	}
+	return fmt.Sprintf("EventReapplyPolicy(%d)", w)
+}
+
+// Equals returns true if this EventReapplyPolicy value matches the provided
+// value.
+func (v EventReapplyPolicy) Equals(rhs EventReapplyPolicy) bool {
+	return v == rhs
+}
+
+// MarshalJSON serializes EventReapplyPolicy into JSON.
+//
+// If the enum value is recognized, its name is returned. Otherwise,
+// its integer value is returned.
+//
+// This implements json.Marshaler.
+func (v EventReapplyPolicy) MarshalJSON() ([]byte, error) {
+	switch int32(v) {
+	case 0:
+		return ([]byte)("\"ALWAYS\""), nil
+	case 1:
+		return ([]byte)("\"IF_RUNNING\""), nil
+	case 2:
+		return ([]byte)("\"NEVER\""), nil
+	}
+	return ([]byte)(strconv.FormatInt(int64(v), 10)), nil
+}
+
+// UnmarshalJSON attempts to decode EventReapplyPolicy from its JSON
+// representation.
+//
+// This implementation supports both, numeric and string inputs. If a
+// string is provided, it must be a known enum name.
+//
+// This implements json.Unmarshaler.
+func (v *EventReapplyPolicy) UnmarshalJSON(text []byte) error {
+	d := json.NewDecoder(bytes.NewReader(text))
+	d.UseNumber()
+	t, err := d.Token()
+	if err != nil {
+		return err
+	}
+
+	switch w := t.(type) {
+	case json.Number:
+		x, err := w.Int64()
+		if err != nil {
+			return err
+		}
+		if x > math.MaxInt32 {
+			return fmt.Errorf("enum overflow from JSON %q for %q", text, "EventReapplyPolicy")
+		}
+		if x < math.MinInt32 {
+			return fmt.Errorf("enum underflow from JSON %q for %q", text, "EventReapplyPolicy")
+		}
+		*v = (EventReapplyPolicy)(x)
+		return nil
+	case string:
+		return v.UnmarshalText([]byte(w))
+	default:
+		return fmt.Errorf("invalid JSON value %q (%T) to unmarshal into %q", t, t, "EventReapplyPolicy")
+	}
+}
+
 type EventType int32
 
 const (
@@ -46002,9 +46186,10 @@ func (v *WorkflowExecutionInfo) IsSetExecutionTime() bool {
 }
 
 type WorkflowExecutionSignaledEventAttributes struct {
-	SignalName *string `json:"signalName,omitempty"`
-	Input      []byte  `json:"input,omitempty"`
-	Identity   *string `json:"identity,omitempty"`
+	SignalName    *string             `json:"signalName,omitempty"`
+	Input         []byte              `json:"input,omitempty"`
+	Identity      *string             `json:"identity,omitempty"`
+	ReapplyPolicy *EventReapplyPolicy `json:"reapplyPolicy,omitempty"`
 }
 
 // ToWire translates a WorkflowExecutionSignaledEventAttributes struct into a Thrift-level intermediate
@@ -46024,7 +46209,7 @@ type WorkflowExecutionSignaledEventAttributes struct {
 //   }
 func (v *WorkflowExecutionSignaledEventAttributes) ToWire() (wire.Value, error) {
 	var (
-		fields [3]wire.Field
+		fields [4]wire.Field
 		i      int = 0
 		w      wire.Value
 		err    error
@@ -46054,8 +46239,22 @@ func (v *WorkflowExecutionSignaledEventAttributes) ToWire() (wire.Value, error) 
 		fields[i] = wire.Field{ID: 30, Value: w}
 		i++
 	}
+	if v.ReapplyPolicy != nil {
+		w, err = v.ReapplyPolicy.ToWire()
+		if err != nil {
+			return w, err
+		}
+		fields[i] = wire.Field{ID: 40, Value: w}
+		i++
+	}
 
 	return wire.NewValueStruct(wire.Struct{Fields: fields[:i]}), nil
+}
+
+func _EventReapplyPolicy_Read(w wire.Value) (EventReapplyPolicy, error) {
+	var v EventReapplyPolicy
+	err := v.FromWire(w)
+	return v, err
 }
 
 // FromWire deserializes a WorkflowExecutionSignaledEventAttributes struct from its Thrift-level
@@ -46108,6 +46307,16 @@ func (v *WorkflowExecutionSignaledEventAttributes) FromWire(w wire.Value) error 
 				}
 
 			}
+		case 40:
+			if field.Value.Type() == wire.TI32 {
+				var x EventReapplyPolicy
+				x, err = _EventReapplyPolicy_Read(field.Value)
+				v.ReapplyPolicy = &x
+				if err != nil {
+					return err
+				}
+
+			}
 		}
 	}
 
@@ -46121,7 +46330,7 @@ func (v *WorkflowExecutionSignaledEventAttributes) String() string {
 		return "<nil>"
 	}
 
-	var fields [3]string
+	var fields [4]string
 	i := 0
 	if v.SignalName != nil {
 		fields[i] = fmt.Sprintf("SignalName: %v", *(v.SignalName))
@@ -46135,8 +46344,22 @@ func (v *WorkflowExecutionSignaledEventAttributes) String() string {
 		fields[i] = fmt.Sprintf("Identity: %v", *(v.Identity))
 		i++
 	}
+	if v.ReapplyPolicy != nil {
+		fields[i] = fmt.Sprintf("ReapplyPolicy: %v", *(v.ReapplyPolicy))
+		i++
+	}
 
 	return fmt.Sprintf("WorkflowExecutionSignaledEventAttributes{%v}", strings.Join(fields[:i], ", "))
+}
+
+func _EventReapplyPolicy_EqualsPtr(lhs, rhs *EventReapplyPolicy) bool {
+	if lhs != nil && rhs != nil {
+
+		x := *lhs
+		y := *rhs
+		return x.Equals(y)
+	}
+	return lhs == nil && rhs == nil
 }
 
 // Equals returns true if all the fields of this WorkflowExecutionSignaledEventAttributes match the
@@ -46158,6 +46381,9 @@ func (v *WorkflowExecutionSignaledEventAttributes) Equals(rhs *WorkflowExecution
 	if !_String_EqualsPtr(v.Identity, rhs.Identity) {
 		return false
 	}
+	if !_EventReapplyPolicy_EqualsPtr(v.ReapplyPolicy, rhs.ReapplyPolicy) {
+		return false
+	}
 
 	return true
 }
@@ -46176,6 +46402,9 @@ func (v *WorkflowExecutionSignaledEventAttributes) MarshalLogObject(enc zapcore.
 	}
 	if v.Identity != nil {
 		enc.AddString("identity", *v.Identity)
+	}
+	if v.ReapplyPolicy != nil {
+		err = multierr.Append(err, enc.AddObject("reapplyPolicy", *v.ReapplyPolicy))
 	}
 	return err
 }
@@ -46223,6 +46452,21 @@ func (v *WorkflowExecutionSignaledEventAttributes) GetIdentity() (o string) {
 // IsSetIdentity returns true if Identity is not nil.
 func (v *WorkflowExecutionSignaledEventAttributes) IsSetIdentity() bool {
 	return v != nil && v.Identity != nil
+}
+
+// GetReapplyPolicy returns the value of ReapplyPolicy if it is set or its
+// zero value if it is unset.
+func (v *WorkflowExecutionSignaledEventAttributes) GetReapplyPolicy() (o EventReapplyPolicy) {
+	if v != nil && v.ReapplyPolicy != nil {
+		return *v.ReapplyPolicy
+	}
+
+	return
+}
+
+// IsSetReapplyPolicy returns true if ReapplyPolicy is not nil.
+func (v *WorkflowExecutionSignaledEventAttributes) IsSetReapplyPolicy() bool {
+	return v != nil && v.ReapplyPolicy != nil
 }
 
 type WorkflowExecutionStartedEventAttributes struct {

@@ -21,7 +21,7 @@
 package history
 
 import (
-	"context"
+	ctx "context"
 	"time"
 
 	"github.com/pborman/uuid"
@@ -44,6 +44,8 @@ var (
 
 	workflowTerminationReason   = "Terminate Workflow Due To Version Conflict."
 	workflowTerminationIdentity = "worker-service"
+
+	workflowResetReason = "Reset Workflow Due To Events Re-application."
 )
 
 type (
@@ -53,6 +55,7 @@ type (
 
 	historyReplicator struct {
 		shard             ShardContext
+		timeSource        clock.TimeSource
 		historyEngine     *historyEngineImpl
 		historyCache      *historyCache
 		domainCache       cache.DomainCache
@@ -73,6 +76,9 @@ var (
 	// ErrRetryEntityNotExists is returned to indicate workflow execution is not created yet and replicator should
 	// try this task again after a small delay.
 	ErrRetryEntityNotExists = &shared.RetryTaskError{Message: "entity not exists"}
+	// ErrRetryRaceCondition is returned to indicate logic race condition encountered and replicator should
+	// try this task again after a small delay.
+	ErrRetryRaceCondition = &shared.RetryTaskError{Message: "encounter race condition, retry"}
 	// ErrRetrySyncActivityMsg is returned when sync activity replication tasks are arriving out of order, should retry
 	ErrRetrySyncActivityMsg = "retry on applying sync activity"
 	// ErrRetryBufferEventsMsg is returned when events are arriving out of order, should retry, or specify force apply
@@ -102,12 +108,21 @@ var (
 	ErrEmptyHistoryRawEventBatch = &shared.BadRequestError{Message: "encounter empty history batch"}
 	// ErrUnknownEncodingType indicate that the encoding type is unknown
 	ErrUnknownEncodingType = &shared.BadRequestError{Message: "unknown encoding type"}
+	// ErrUnknownEventReapplyPolicy indicate that the event reapply policy is unknown
+	ErrUnknownEventReapplyPolicy = &shared.BadRequestError{Message: "unknown event reapply policy"}
+	// ErrUnreappliableEvent indicate that the event is not reappliable
+	ErrUnreappliableEvent = &shared.BadRequestError{Message: "event is not "}
+	// ErrWorkflowMutationDecision indicate that something is wrong with mutating workflow, i.e. adding decision to workflow
+	ErrWorkflowMutationDecision = &shared.BadRequestError{Message: "error encountered when mutating workflow adding decision"}
+	// ErrWorkflowMutationSignal indicate that something is wrong with mutating workflow, i.e. adding signal to workflow
+	ErrWorkflowMutationSignal = &shared.BadRequestError{Message: "error encountered when mutating workflow adding signal"}
 )
 
-func newHistoryReplicator(shard ShardContext, historyEngine *historyEngineImpl, historyCache *historyCache, domainCache cache.DomainCache,
+func newHistoryReplicator(shard ShardContext, timeSource clock.TimeSource, historyEngine *historyEngineImpl, historyCache *historyCache, domainCache cache.DomainCache,
 	historyMgr persistence.HistoryManager, historyV2Mgr persistence.HistoryV2Manager, logger bark.Logger) *historyReplicator {
 	replicator := &historyReplicator{
 		shard:             shard,
+		timeSource:        timeSource,
 		historyEngine:     historyEngine,
 		historyCache:      historyCache,
 		domainCache:       domainCache,
@@ -138,7 +153,7 @@ func newHistoryReplicator(shard ShardContext, historyEngine *historyEngineImpl, 
 	return replicator
 }
 
-func (r *historyReplicator) SyncActivity(ctx context.Context, request *h.SyncActivityRequest) (retError error) {
+func (r *historyReplicator) SyncActivity(ctx ctx.Context, request *h.SyncActivityRequest) (retError error) {
 
 	// sync activity info will only be sent from active side, when
 	// 1. activity has retry policy and activity got started
@@ -257,7 +272,7 @@ func (r *historyReplicator) SyncActivity(ctx context.Context, request *h.SyncAct
 	return r.updateMutableStateWithTimer(context, msBuilder, now, timerTasks)
 }
 
-func (r *historyReplicator) ApplyRawEvents(ctx context.Context, requestIn *h.ReplicateRawEventsRequest) (retError error) {
+func (r *historyReplicator) ApplyRawEvents(ctx ctx.Context, requestIn *h.ReplicateRawEventsRequest) (retError error) {
 	var err error
 	var events []*workflow.HistoryEvent
 	var newRunEvents []*workflow.HistoryEvent
@@ -298,7 +313,7 @@ func (r *historyReplicator) ApplyRawEvents(ctx context.Context, requestIn *h.Rep
 	return r.ApplyEvents(ctx, requestOut)
 }
 
-func (r *historyReplicator) ApplyEvents(ctx context.Context, request *h.ReplicateEventsRequest) (retError error) {
+func (r *historyReplicator) ApplyEvents(ctx ctx.Context, request *h.ReplicateEventsRequest) (retError error) {
 	logger := r.logger.WithFields(bark.Fields{
 		logging.TagWorkflowExecutionID: request.WorkflowExecution.GetWorkflowId(),
 		logging.TagWorkflowRunID:       request.WorkflowExecution.GetRunId(),
@@ -392,7 +407,7 @@ func (r *historyReplicator) ApplyEvents(ctx context.Context, request *h.Replicat
 	}
 }
 
-func (r *historyReplicator) ApplyStartEvent(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) ApplyStartEvent(ctx ctx.Context, context workflowExecutionContext,
 	request *h.ReplicateEventsRequest,
 	logger bark.Logger) error {
 	msBuilder := r.getNewMutableState(request.GetVersion(), logger)
@@ -400,32 +415,37 @@ func (r *historyReplicator) ApplyStartEvent(ctx context.Context, context workflo
 	return err
 }
 
-func (r *historyReplicator) ApplyOtherEventsMissingMutableState(ctx context.Context, domainID string, workflowID string,
+func (r *historyReplicator) ApplyOtherEventsMissingMutableState(ctx ctx.Context, domainID string, workflowID string,
 	runID string, request *h.ReplicateEventsRequest, logger bark.Logger) (retError error) {
 
 	// size check already done
 	lastEvent := request.History.Events[len(request.History.Events)-1]
 
 	// we need to check the current workflow execution
-	_, currentMutableState, currentRelease, err := r.getCurrentWorkflowMutableState(ctx, domainID, workflowID)
+	currentContext, currentMutableState, currentRelease, err := r.getCurrentWorkflowMutableState(ctx, domainID, workflowID)
 	if err != nil {
 		if _, ok := err.(*shared.EntityNotExistsError); !ok {
 			return err
 		}
 		return newRetryTaskErrorWithHint(ErrWorkflowNotFoundMsg, domainID, workflowID, runID, common.FirstEventID)
 	}
+	defer func() { currentRelease(retError) }()
+
 	currentRunID := currentMutableState.GetExecutionInfo().RunID
 	currentLastEventTaskID := currentMutableState.GetExecutionInfo().LastEventTaskID
 	currentNextEventID := currentMutableState.GetNextEventID()
 	currentLastWriteVersion := currentMutableState.GetLastWriteVersion()
 	currentStillRunning := currentMutableState.IsWorkflowExecutionRunning()
-	currentRelease(nil)
 
 	if currentLastWriteVersion > lastEvent.GetVersion() {
 		logger.Info("Dropping replication task.")
 		r.metricsClient.IncCounter(metrics.ReplicateHistoryEventsScope, metrics.StaleReplicationEventsCounter)
-		return nil
+		return r.reapplyEvents(ctx, currentContext, currentMutableState, request.History.Events)
 	}
+
+	// release for better lock management
+	currentRelease(nil)
+
 	if currentLastWriteVersion < lastEvent.GetVersion() {
 		if currentStillRunning {
 			err = r.terminateWorkflow(ctx, domainID, workflowID, currentRunID, lastEvent.GetVersion(), lastEvent.GetTimestamp(), logger)
@@ -448,6 +468,7 @@ func (r *historyReplicator) ApplyOtherEventsMissingMutableState(ctx context.Cont
 	// currentLastWriteVersion == incomingVersion
 	if currentStillRunning {
 		if lastEvent.GetTaskId() < currentLastEventTaskID {
+			// versions are the same, so not necessary to re-apply signals
 			return nil
 		}
 		return newRetryTaskErrorWithHint(ErrWorkflowNotFoundMsg, domainID, workflowID, currentRunID, currentNextEventID)
@@ -460,7 +481,7 @@ func (r *historyReplicator) ApplyOtherEventsMissingMutableState(ctx context.Cont
 	return newRetryTaskErrorWithHint(ErrWorkflowNotFoundMsg, domainID, workflowID, runID, common.FirstEventID)
 }
 
-func (r *historyReplicator) ApplyOtherEventsVersionChecking(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) ApplyOtherEventsVersionChecking(ctx ctx.Context, context workflowExecutionContext,
 	msBuilder mutableState, request *h.ReplicateEventsRequest, logger bark.Logger) (mutableState, error) {
 	var err error
 	// check if to buffer / drop / conflict resolution
@@ -471,7 +492,31 @@ func (r *historyReplicator) ApplyOtherEventsVersionChecking(ctx context.Context,
 		// Replication state is already on a higher version, we can drop this event
 		logger.Info("Dropping stale replication task.")
 		r.metricsClient.IncCounter(metrics.ReplicateHistoryEventsScope, metrics.StaleReplicationEventsCounter)
-		_, err = r.garbageCollectSignals(context, msBuilder, request.History.Events)
+
+		events := request.History.Events
+		// this workflow running, try re-apply events to it
+		// NOTE: if a workflow is running, then it must be the current workflow
+		if msBuilder.IsWorkflowExecutionRunning() {
+			err = r.reapplyEvents(ctx, context, msBuilder, events)
+			return nil, err
+		}
+
+		// must get the current run ID first
+		// if trying to getCurrentWorkflowRunID function (which use mutable state cache)
+		// there can be deadlock if current workflow is this workflow
+		currentRunID, err := r.getCurrentWorkflowRunID(context.getDomainID(), context.getExecution().GetWorkflowId())
+		if currentRunID == context.getExecution().GetRunId() {
+			err = r.reapplyEvents(ctx, context, msBuilder, events)
+			return nil, err
+		}
+		currentContext, currentMutableState, currentRelease, err := r.getCurrentWorkflowMutableState(
+			ctx, context.getDomainID(), context.getExecution().GetWorkflowId(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { currentRelease(err) }()
+		err = r.reapplyEvents(ctx, currentContext, currentMutableState, events)
 		return nil, err
 	}
 
@@ -552,7 +597,7 @@ func (r *historyReplicator) ApplyOtherEventsVersionChecking(ctx context.Context,
 		return nil, err
 	}
 
-	if ri.GetLastEventId() < msBuilder.GetReplicationState().LastWriteEventID || msBuilder.HasBufferedEvents() {
+	if ri.GetLastEventId() < msBuilder.GetReplicationState().LastWriteEventID {
 		// the reason to reset mutable state if mutable state has buffered events
 		// is: what buffered event actually do is delay generation of event ID,
 		// the actual action of those buffered event are already applied to mutable state.
@@ -567,7 +612,7 @@ func (r *historyReplicator) ApplyOtherEventsVersionChecking(ctx context.Context,
 	return msBuilder, nil
 }
 
-func (r *historyReplicator) ApplyOtherEvents(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) ApplyOtherEvents(ctx ctx.Context, context workflowExecutionContext,
 	msBuilder mutableState, request *h.ReplicateEventsRequest, logger bark.Logger) error {
 	var err error
 	firstEventID := request.GetFirstEventId()
@@ -603,7 +648,7 @@ func (r *historyReplicator) ApplyOtherEvents(ctx context.Context, context workfl
 	return err
 }
 
-func (r *historyReplicator) ApplyReplicationTask(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) ApplyReplicationTask(ctx ctx.Context, context workflowExecutionContext,
 	msBuilder mutableState, request *h.ReplicateEventsRequest, logger bark.Logger) error {
 
 	if !msBuilder.IsWorkflowExecutionRunning() {
@@ -671,9 +716,9 @@ func (r *historyReplicator) ApplyReplicationTask(ctx context.Context, context wo
 	return err
 }
 
-func (r *historyReplicator) replicateWorkflowStarted(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) replicateWorkflowStarted(ctx ctx.Context, context workflowExecutionContext,
 	msBuilder mutableState, di *decisionInfo,
-	sourceCluster string, history *shared.History, sBuilder stateBuilder, logger bark.Logger) error {
+	sourceCluster string, history *shared.History, sBuilder stateBuilder, logger bark.Logger) (retError error) {
 	executionInfo := msBuilder.GetExecutionInfo()
 	domainID := executionInfo.DomainID
 	execution := shared.WorkflowExecution{
@@ -830,7 +875,7 @@ func (r *historyReplicator) replicateWorkflowStarted(ctx context.Context, contex
 	// current workflow is completed
 	if currentState == persistence.WorkflowStateCompleted {
 		// allow the application of workflow creation if currentLastWriteVersion > incomingVersion
-		// because this can be caused by missing replication events
+		// because this can be caused by the combination of missing replication events few failovers
 		// proceed to create workflow
 		isBrandNew = false
 		return createWorkflow(isBrandNew, currentRunID, currentLastWriteVersion)
@@ -841,8 +886,15 @@ func (r *historyReplicator) replicateWorkflowStarted(ctx context.Context, contex
 		logger.Info("Dropping stale start replication task.")
 		r.metricsClient.IncCounter(metrics.ReplicateHistoryEventsScope, metrics.StaleReplicationEventsCounter)
 		deleteHistory()
-		return nil
+
+		currentContext, currentMutableState, currentRelease, err := r.getCurrentWorkflowMutableState(ctx, domainID, execution.GetWorkflowId())
+		if err != nil {
+			return err
+		}
+		defer func() { currentRelease(retError) }()
+		return r.reapplyEvents(ctx, currentContext, currentMutableState, history.Events)
 	}
+
 	if currentLastWriteVersion == incomingVersion {
 		_, currentMutableState, currentRelease, err := r.getCurrentWorkflowMutableState(ctx, domainID, execution.GetWorkflowId())
 		if err != nil {
@@ -854,6 +906,7 @@ func (r *historyReplicator) replicateWorkflowStarted(ctx context.Context, contex
 		currentRelease(nil)
 
 		if executionInfo.LastEventTaskID < currentLastEventTaskID {
+			// versions are the same, so not necessary to re-apply signals
 			return nil
 		}
 		return newRetryTaskErrorWithHint(ErrRetryExistingWorkflowMsg, domainID, execution.GetWorkflowId(), currentRunID, currentNextEventID)
@@ -881,7 +934,7 @@ func (r *historyReplicator) replicateWorkflowStarted(ctx context.Context, contex
 	return createWorkflow(isBrandNew, currentRunID, incomingVersion)
 }
 
-func (r *historyReplicator) conflictResolutionTerminateCurrentRunningIfNotSelf(ctx context.Context,
+func (r *historyReplicator) conflictResolutionTerminateCurrentRunningIfNotSelf(ctx ctx.Context,
 	msBuilder mutableState, incomingVersion int64, incomingTimestamp int64, logger bark.Logger) (currentRunID string, retError error) {
 	// this function aims to solve the edge case when this workflow, when going through
 	// reset, has already started a next generation (continue as new-ed workflow)
@@ -935,7 +988,7 @@ func (r *historyReplicator) conflictResolutionTerminateCurrentRunningIfNotSelf(c
 }
 
 // func (r *historyReplicator) getCurrentWorkflowInfo(domainID string, workflowID string) (runID string, lastWriteVersion int64, closeStatus int, retError error) {
-func (r *historyReplicator) getCurrentWorkflowMutableState(ctx context.Context, domainID string,
+func (r *historyReplicator) getCurrentWorkflowMutableState(ctx ctx.Context, domainID string,
 	workflowID string) (workflowExecutionContext, mutableState, releaseWorkflowExecutionFunc, error) {
 	// we need to check the current workflow execution
 	context, release, err := r.historyCache.getOrCreateWorkflowExecutionWithTimeout(ctx,
@@ -956,7 +1009,18 @@ func (r *historyReplicator) getCurrentWorkflowMutableState(ctx context.Context, 
 	return context, msBuilder, release, nil
 }
 
-func (r *historyReplicator) terminateWorkflow(ctx context.Context, domainID string, workflowID string,
+func (r *historyReplicator) getCurrentWorkflowRunID(domainID string, workflowID string) (string, error) {
+	resp, err := r.historyEngine.executionManager.GetCurrentExecution(&persistence.GetCurrentExecutionRequest{
+		DomainID:   domainID,
+		WorkflowID: workflowID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.RunID, nil
+}
+
+func (r *historyReplicator) terminateWorkflow(ctx ctx.Context, domainID string, workflowID string,
 	runID string, incomingVersion int64, incomingTimestamp int64, logger bark.Logger) (retError error) {
 
 	execution := shared.WorkflowExecution{
@@ -1031,7 +1095,7 @@ func (r *historyReplicator) getLatestCheckpoint(replicationInfoRemote map[string
 	return lastValidVersion, lastValidEventID
 }
 
-func (r *historyReplicator) resetMutableState(ctx context.Context, context workflowExecutionContext,
+func (r *historyReplicator) resetMutableState(ctx ctx.Context, context workflowExecutionContext,
 	msBuilder mutableState, lastEventID int64, incomingVersion int64, incomingTimestamp int64, logger bark.Logger) (mutableState, error) {
 
 	r.metricsClient.IncCounter(metrics.ReplicateHistoryEventsScope, metrics.HistoryConflictsCounter)
@@ -1105,69 +1169,226 @@ func (r *historyReplicator) deserializeBlob(blob *workflow.DataBlob) ([]*workflo
 
 func (r *historyReplicator) flushEventsBuffer(context workflowExecutionContext, msBuilder mutableState) error {
 
-	if !msBuilder.IsWorkflowExecutionRunning() || !msBuilder.HasBufferedEvents() || !r.canModifyWorkflow(msBuilder) {
+	if !msBuilder.IsWorkflowExecutionRunning() || !msBuilder.HasBufferedEvents() {
 		return nil
+	}
+	canMutateWorkflow, err := r.prepareWorkflowMutation(msBuilder)
+	if err != nil || !canMutateWorkflow {
+		return err
 	}
 
 	di, ok := msBuilder.GetInFlightDecisionTask()
 	if !ok {
 		return ErrCorruptedMutableStateDecision
 	}
-	msBuilder.UpdateReplicationStateVersion(msBuilder.GetLastWriteVersion(), true)
 	msBuilder.AddDecisionTaskFailedEvent(di.ScheduleID, di.StartedID,
 		workflow.DecisionTaskFailedCauseFailoverCloseDecision, nil, identityHistoryService, "", "", "", 0)
 
-	// there is no need to generate a new decision and corresponding decision timer task
-	// here, the intent is to flush the buffered events
+	return r.persistWorkflowMutation(context, msBuilder, []persistence.Task{}, []persistence.Task{})
+}
+
+func (r *historyReplicator) reapplyEvents(ctx ctx.Context, context workflowExecutionContext,
+	msBuilder mutableState, events []*workflow.HistoryEvent) error {
+
+	alwaysReapplyEvents := []*workflow.HistoryEvent{}
+	ifRunningReapplyEvents := []*workflow.HistoryEvent{}
+	neverReapplyEvents := []*workflow.HistoryEvent{}
+	for _, event := range events {
+		switch event.GetEventType() {
+		case workflow.EventTypeWorkflowExecutionSignaled:
+			attr := event.WorkflowExecutionSignaledEventAttributes
+			switch attr.GetReapplyPolicy() {
+			case shared.EventReapplyPolicyAlways:
+				alwaysReapplyEvents = append(alwaysReapplyEvents, event)
+			case shared.EventReapplyPolicyIfRunning:
+				ifRunningReapplyEvents = append(ifRunningReapplyEvents, event)
+			case shared.EventReapplyPolicyNever:
+				neverReapplyEvents = append(neverReapplyEvents, event)
+			default:
+				return ErrUnknownEventReapplyPolicy
+			}
+		}
+	}
+
+	if len(alwaysReapplyEvents) == 0 &&
+		len(ifRunningReapplyEvents) == 0 &&
+		len(neverReapplyEvents) == 0 {
+		return nil
+	}
+
+	if msBuilder.IsWorkflowExecutionRunning() {
+		// apply alwaysReapplyEvents && ifRunningReapplyEvents
+		reapplyEvents := []*workflow.HistoryEvent{}
+		reapplyEvents = append(reapplyEvents, alwaysReapplyEvents...)
+		reapplyEvents = append(reapplyEvents, ifRunningReapplyEvents...)
+		return r.reapplyEventsToCurrentRunningWorkflow(ctx, context, msBuilder, reapplyEvents)
+	}
+
+	if len(alwaysReapplyEvents) > 0 {
+		reapplyEvents := []*workflow.HistoryEvent{}
+		reapplyEvents = append(reapplyEvents, alwaysReapplyEvents...)
+		reapplyEvents = append(reapplyEvents, ifRunningReapplyEvents...)
+		return r.reapplyEventsToCurrentClosedWorkflow(ctx, context, msBuilder, reapplyEvents)
+	}
+
+	// if alwaysReapplyEvents is 0 size and ifRunningReapplyEvents is not
+	// cannot do workflow reset to re-apply events
+	return nil
+}
+
+func (r *historyReplicator) reapplyEventsToCurrentRunningWorkflow(
+	ctx ctx.Context, context workflowExecutionContext,
+	msBuilder mutableState, events []*workflow.HistoryEvent) error {
+
+	canMutateWorkflow, err := r.prepareWorkflowMutation(msBuilder)
+	if err != nil || !canMutateWorkflow {
+		return err
+	}
+
+	for _, event := range events {
+		switch event.GetEventType() {
+		case workflow.EventTypeWorkflowExecutionSignaled:
+			attr := event.WorkflowExecutionSignaledEventAttributes
+			if msBuilder.AddWorkflowExecutionSignaled(attr.GetSignalName(), attr.Input, attr.GetIdentity()) == nil {
+				return ErrWorkflowMutationSignal
+			}
+		default:
+			return ErrUnreappliableEvent
+		}
+	}
+
+	return r.persistWorkflowMutation(context, msBuilder, []persistence.Task{}, []persistence.Task{})
+}
+
+func (r *historyReplicator) reapplyEventsToCurrentClosedWorkflow(
+	ctx ctx.Context, context workflowExecutionContext,
+	msBuilder mutableState, events []*workflow.HistoryEvent) (retError error) {
+
+	domainID := msBuilder.GetExecutionInfo().DomainID
+	workflowID := msBuilder.GetExecutionInfo().WorkflowID
+
+	domainEntry, err := r.domainCache.GetDomainByID(domainID)
+	if err != nil {
+		return err
+	}
+
+	resetNewRunID := uuid.New()
+	resetRequestID := uuid.New()
+	// workflow event buffer guarantee that the event immediately
+	// after the decision task started is decision task finished event
+	resetDecisionID := msBuilder.GetPreviousStartedEventID() + 1
+
+	baseContext := context
+	baseMutableState := msBuilder
+	currContext := context
+	currMutableState := msBuilder
+	currPrevRunVersion := msBuilder.GetLastWriteVersion()
+	currTerminated := false
+	currCloseTask := (persistence.Task)(nil)
+	currCleanupTask := (persistence.Task)(nil)
+
+	err = r.resetor.resetWorkflowExecution(
+		ctx,
+		domainEntry,
+		workflowResetReason,
+		resetDecisionID,
+		resetRequestID,
+		resetNewRunID,
+		baseContext,
+		baseMutableState,
+		currContext,
+		currMutableState,
+		currPrevRunVersion,
+		currTerminated,
+		currCloseTask,
+		currCleanupTask,
+	)
+	if err != nil {
+		return err
+	}
+
+	resetNewExecution := shared.WorkflowExecution{
+		WorkflowId: common.StringPtr(workflowID),
+		RunId:      common.StringPtr(resetNewRunID),
+	}
+	resetNewContext, resetNewRelease, err := r.historyCache.getOrCreateWorkflowExecutionWithTimeout(
+		ctx, domainID, resetNewExecution,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { resetNewRelease(retError) }()
+	resetNewMsBuilder, err := context.loadWorkflowExecution()
+	if err != nil {
+		return err
+	}
+	if resetNewMsBuilder.IsWorkflowExecutionRunning() {
+		return ErrRetryRaceCondition
+	}
+
+	return r.reapplyEventsToCurrentRunningWorkflow(ctx, resetNewContext, resetNewMsBuilder, events)
+}
+
+func (r *historyReplicator) prepareWorkflowMutation(msBuilder mutableState) (bool, error) {
+	// for replication stack to modify workflow re-applying events
+	// we need to check 2 things
+	// 1. if the workflow's last write version indicates that workflow is active here
+	// 2. if the domain entry says this domain is active and failover version in the domain entry >= workflow's last write version
+	// if either of the above is true, then the workflow can be mutated
+
+	lastWriteVersion := msBuilder.GetLastWriteVersion()
+	lastWriteVersionActive := r.clusterMetadata.ClusterNameForFailoverVersion(lastWriteVersion) == r.clusterMetadata.GetCurrentClusterName()
+	if lastWriteVersionActive {
+		msBuilder.UpdateReplicationStateVersion(lastWriteVersion, true)
+		return true, nil
+	}
+
+	domainEntry, err := r.domainCache.GetDomainByID(msBuilder.GetExecutionInfo().DomainID)
+	if err != nil {
+		return false, err
+	}
+
+	domainFailoverVersion := domainEntry.GetFailoverVersion()
+	domainActive := domainEntry.GetReplicationConfig().ActiveClusterName == r.clusterMetadata.GetCurrentClusterName() &&
+		domainFailoverVersion >= lastWriteVersion
+
+	if domainActive {
+		msBuilder.UpdateReplicationStateVersion(domainFailoverVersion, true)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *historyReplicator) persistWorkflowMutation(context workflowExecutionContext, msBuilder mutableState,
+	transferTasks []persistence.Task, timerTasks []persistence.Task) error {
+
+	if !msBuilder.HasPendingDecisionTask() {
+		executionInfo := msBuilder.GetExecutionInfo()
+		di := msBuilder.AddDecisionTaskScheduledEvent()
+		if di == nil {
+			return ErrWorkflowMutationDecision
+		}
+		transferTasks = append(transferTasks, &persistence.DecisionTask{
+			DomainID:   executionInfo.DomainID,
+			TaskList:   di.TaskList,
+			ScheduleID: di.ScheduleID,
+		})
+		if msBuilder.IsStickyTaskListEnabled() {
+			tBuilder := newTimerBuilder(r.shard.GetConfig(), r.logger, r.timeSource)
+			stickyTaskTimeoutTimer := tBuilder.AddScheduleToStartDecisionTimoutTask(
+				di.ScheduleID,
+				di.Attempt,
+				executionInfo.StickyScheduleToStartTimeout,
+			)
+			timerTasks = append(timerTasks, stickyTaskTimeoutTimer)
+		}
+	}
 
 	transactionID, err := r.shard.GetNextTransferTaskID()
 	if err != nil {
 		return err
 	}
-	return context.updateWorkflowExecution(nil, nil, transactionID)
-}
-
-func (r *historyReplicator) garbageCollectSignals(context workflowExecutionContext,
-	msBuilder mutableState, events []*workflow.HistoryEvent) (bool, error) {
-
-	// this function modify the mutable state passed in applying stale signals
-	// so the check of workflow still running and the ability to modify this workflow
-	// is utterly necessary
-	if !msBuilder.IsWorkflowExecutionRunning() || !r.canModifyWorkflow(msBuilder) {
-		return false, nil
-	}
-
-	// we are garbage collecting signals already applied to mutable states,
-	// so targeting child workflow only check is not necessary
-
-	// TODO should we also include the request ID in the signal request in the event?
-	updateMutableState := false
-	msBuilder.UpdateReplicationStateVersion(msBuilder.GetLastWriteVersion(), true)
-	for _, event := range events {
-		switch event.GetEventType() {
-		case workflow.EventTypeWorkflowExecutionSignaled:
-			updateMutableState = true
-			attr := event.WorkflowExecutionSignaledEventAttributes
-			if msBuilder.AddWorkflowExecutionSignaled(attr.GetSignalName(), attr.Input, attr.GetIdentity()) == nil {
-				return false, &workflow.InternalServiceError{Message: "Unable to signal workflow execution."}
-			}
-		}
-	}
-
-	if !updateMutableState {
-		return false, nil
-	}
-
-	transactionID, err := r.shard.GetNextTransferTaskID()
-	if err != nil {
-		return false, err
-	}
-	return true, context.updateWorkflowExecution(nil, nil, transactionID)
-}
-
-func (r *historyReplicator) canModifyWorkflow(msBuilder mutableState) bool {
-	lastWriteVersion := msBuilder.GetLastWriteVersion()
-	return r.clusterMetadata.ClusterNameForFailoverVersion(lastWriteVersion) == r.clusterMetadata.GetCurrentClusterName()
+	return context.updateWorkflowExecution(transferTasks, timerTasks, transactionID)
 }
 
 func logError(logger bark.Logger, msg string, err error) {

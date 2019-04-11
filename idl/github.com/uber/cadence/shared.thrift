@@ -247,6 +247,12 @@ enum ArchivalStatus {
   ENABLED,
 }
 
+enum EventReapplyPolicy {
+  ALWAYS,
+  IF_RUNNING,
+  NEVER,
+}
+
 struct Header {
     10: optional map<string, binary> fields
 }
@@ -627,6 +633,7 @@ struct WorkflowExecutionSignaledEventAttributes {
   10: optional string signalName
   20: optional binary input
   30: optional string identity
+  40: optional EventReapplyPolicy reapplyPolicy
 }
 
 struct WorkflowExecutionTerminatedEventAttributes {
