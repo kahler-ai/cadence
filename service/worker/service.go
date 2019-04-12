@@ -22,13 +22,14 @@ package worker
 
 import (
 	"context"
+	"github.com/uber/cadence/.gen/go/shared"
+	shared2 "go.uber.org/cadence/.gen/go/shared"
 	"sync/atomic"
 	"time"
 
 	"github.com/uber-common/bark"
 	"github.com/uber/cadence/client/public"
 	"github.com/uber/cadence/common"
-	"github.com/uber/cadence/common/blobstore"
 	"github.com/uber/cadence/common/cache"
 	"github.com/uber/cadence/common/logging"
 	"github.com/uber/cadence/common/metrics"
@@ -40,7 +41,6 @@ import (
 	"github.com/uber/cadence/service/worker/indexer"
 	"github.com/uber/cadence/service/worker/replicator"
 	"github.com/uber/cadence/service/worker/scanner"
-	"go.uber.org/cadence/.gen/go/shared"
 )
 
 const (
@@ -220,67 +220,89 @@ func (s *Service) startIndexer(base service.Service) {
 }
 
 func (s *Service) startArchiver(base service.Service, pFactory persistencefactory.Factory) {
-	publicClient := public.NewRetryableClient(
-		base.GetClientBean().GetPublicClient(),
-		common.CreatePublicClientRetryPolicy(),
-		common.IsWhitelistServiceTransientError,
-	)
-	s.waitForFrontendStart(publicClient)
-
-	historyManager, err := pFactory.NewHistoryManager()
-	if err != nil {
-		s.logger.WithError(err).Fatal("failed to start archiver, could not create HistoryManager")
-	}
-	historyV2Manager, err := pFactory.NewHistoryV2Manager()
-	if err != nil {
-		s.logger.WithError(err).Fatal("failed to start archiver, could not create HistoryV2Manager")
-	}
-	metadataMgr, err := pFactory.NewMetadataManager(persistencefactory.MetadataV1V2)
-	if err != nil {
-		s.logger.WithError(err).Fatal("failed to start archiver, could not create MetadataManager")
-	}
-	domainCache := cache.NewDomainCache(metadataMgr, s.params.ClusterMetadata, s.metricsClient, s.logger)
-	domainCache.Start()
-
-	blobstoreClient := blobstore.NewRetryableClient(
-		blobstore.NewMetricClient(s.params.BlobstoreClient, s.metricsClient),
-		s.params.BlobstoreClient.GetRetryPolicy(),
-		s.params.BlobstoreClient.IsRetryableError)
-
-	bc := &archiver.BootstrapContainer{
-		PublicClient:     publicClient,
-		MetricsClient:    s.metricsClient,
-		Logger:           s.logger,
-		ClusterMetadata:  base.GetClusterMetadata(),
-		HistoryManager:   historyManager,
-		HistoryV2Manager: historyV2Manager,
-		Blobstore:        blobstoreClient,
-		DomainCache:      domainCache,
-		Config:           s.config.ArchiverConfig,
-	}
-	clientWorker := archiver.NewClientWorker(bc)
-	if err := clientWorker.Start(); err != nil {
-		clientWorker.Stop()
-		s.logger.WithError(err).Fatal("failed to start archiver")
-	}
-}
-
-func (s *Service) waitForFrontendStart(publicClient public.Client) {
-	request := &shared.DescribeDomainRequest{
+	frontendClient := base.GetClientBean().GetFrontendClient()
+	req := &shared.DescribeDomainRequest{
 		Name: common.StringPtr(common.SystemDomainName),
 	}
-
-RetryLoop:
-	for i := 0; i < publicClientRetryLimit; i++ {
-		if _, err := publicClient.DescribeDomain(context.Background(), request); err == nil {
-			return
-		}
-		select {
-		case <-time.After(publicClientPollingDelay):
-			continue RetryLoop
-		case <-s.stopC:
-			return
-		}
+	resp, err := frontendClient.DescribeDomain(context.Background(), req)
+	if err != nil {
+		s.logger.WithError(err).Error("andrew frontend: got error calling frontend")
+	} else {
+		s.logger.WithField("domain-name", *resp.DomainInfo.Name).Info("andrew frontend: got domain successfully")
 	}
-	s.logger.Fatal("failed to connect to frontend client")
+
+	publicClient := base.GetClientBean().GetPublicClient()
+	secondReq := &shared2.DescribeDomainRequest{
+		Name: common.StringPtr(common.SystemDomainName),
+	}
+	secondResp, secondErr := publicClient.DescribeDomain(context.Background(), secondReq)
+	if secondErr != nil {
+		s.logger.WithError(secondErr).Error("andrew public: got error calling frontend")
+	} else {
+		s.logger.WithField("domain-name", *secondResp.DomainInfo.Name).Info("andrew public: got domain successfully")
+	}
+
+	//publicClient := public.NewRetryableClient(
+	//	base.GetClientBean().GetPublicClient(),
+	//	common.CreatePublicClientRetryPolicy(),
+	//	common.IsWhitelistServiceTransientError,
+	//)
+	//s.waitForFrontendStart(publicClient)
+	//
+	//historyManager, err := pFactory.NewHistoryManager()
+	//if err != nil {
+	//	s.logger.WithError(err).Fatal("failed to start archiver, could not create HistoryManager")
+	//}
+	//historyV2Manager, err := pFactory.NewHistoryV2Manager()
+	//if err != nil {
+	//	s.logger.WithError(err).Fatal("failed to start archiver, could not create HistoryV2Manager")
+	//}
+	//metadataMgr, err := pFactory.NewMetadataManager(persistencefactory.MetadataV1V2)
+	//if err != nil {
+	//	s.logger.WithError(err).Fatal("failed to start archiver, could not create MetadataManager")
+	//}
+	//domainCache := cache.NewDomainCache(metadataMgr, s.params.ClusterMetadata, s.metricsClient, s.logger)
+	//domainCache.Start()
+	//
+	//blobstoreClient := blobstore.NewRetryableClient(
+	//	blobstore.NewMetricClient(s.params.BlobstoreClient, s.metricsClient),
+	//	s.params.BlobstoreClient.GetRetryPolicy(),
+	//	s.params.BlobstoreClient.IsRetryableError)
+	//
+	//bc := &archiver.BootstrapContainer{
+	//	PublicClient:     publicClient,
+	//	MetricsClient:    s.metricsClient,
+	//	Logger:           s.logger,
+	//	ClusterMetadata:  base.GetClusterMetadata(),
+	//	HistoryManager:   historyManager,
+	//	HistoryV2Manager: historyV2Manager,
+	//	Blobstore:        blobstoreClient,
+	//	DomainCache:      domainCache,
+	//	Config:           s.config.ArchiverConfig,
+	//}
+	//clientWorker := archiver.NewClientWorker(bc)
+	//if err := clientWorker.Start(); err != nil {
+	//	clientWorker.Stop()
+	//	s.logger.WithError(err).Fatal("failed to start archiver")
+	//}
 }
+
+//func (s *Service) waitForFrontendStart(publicClient public.Client) {
+//	request := &shared.DescribeDomainRequest{
+//		Name: common.StringPtr(common.SystemDomainName),
+//	}
+//
+//RetryLoop:
+//	for i := 0; i < publicClientRetryLimit; i++ {
+//		if _, err := publicClient.DescribeDomain(context.Background(), request); err == nil {
+//			return
+//		}
+//		select {
+//		case <-time.After(publicClientPollingDelay):
+//			continue RetryLoop
+//		case <-s.stopC:
+//			return
+//		}
+//	}
+//	s.logger.Fatal("failed to connect to frontend client")
+//}

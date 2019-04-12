@@ -209,7 +209,7 @@ func (cf *rpcClientFactory) NewPublicClientWithTimeout(
 	}
 
 	clientProvider := func(clientKey string) (interface{}, error) {
-		dispatcher := cf.rpcFactory.CreateDispatcherForOutbound(publicCaller, common.FrontendServiceName, clientKey)
+		dispatcher := cf.rpcFactory.CreateDispatcherForOutbound(frontendCaller, common.FrontendServiceName, clientKey)
 		return publicClientInterface.New(dispatcher.ClientConfig(common.FrontendServiceName)), nil
 	}
 
