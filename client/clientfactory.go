@@ -21,6 +21,7 @@
 package client
 
 import (
+	"fmt"
 	"time"
 
 	"go.uber.org/yarpc"
@@ -197,12 +198,14 @@ func (cf *rpcClientFactory) NewPublicClientWithTimeout(
 	// except the interface definition
 	resolver, err := cf.monitor.GetResolver(common.FrontendServiceName)
 	if err != nil {
+		panic(fmt.Sprintf("andrew failed to get resolver: %v", err))
 		return nil, err
 	}
 
 	keyResolver := func(key string) (string, error) {
 		host, err := resolver.Lookup(key)
 		if err != nil {
+			panic(fmt.Sprintf("andrew failed to do key lookup: %v", err))
 			return "", err
 		}
 		return host.GetAddress(), nil
