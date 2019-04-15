@@ -33,7 +33,6 @@ import (
 	workflow "github.com/uber/cadence/.gen/go/shared"
 	hc "github.com/uber/cadence/client/history"
 	"github.com/uber/cadence/client/matching"
-	"github.com/uber/cadence/client/public"
 	"github.com/uber/cadence/common"
 	"github.com/uber/cadence/common/cache"
 	"github.com/uber/cadence/common/clock"
@@ -46,6 +45,7 @@ import (
 	"github.com/uber/cadence/common/metrics"
 	"github.com/uber/cadence/common/persistence"
 	"github.com/uber/cadence/service/worker/archiver"
+	"go.uber.org/cadence/.gen/go/cadence/workflowserviceclient"
 	"go.uber.org/cadence/.gen/go/shared"
 	"go.uber.org/yarpc"
 )
@@ -142,7 +142,7 @@ func NewEngineWithShardContext(
 	visibilityMgr persistence.VisibilityManager,
 	matching matching.Client,
 	historyClient hc.Client,
-	publicClient public.Client,
+	publicClient workflowserviceclient.Interface,
 	historyEventNotifier historyEventNotifier,
 	publisher messaging.Producer,
 	visibilityProducer messaging.Producer,
@@ -1375,7 +1375,7 @@ Update_History_Loop:
 					}
 				} else {
 					// this is a cron workflow
-					startEvent, err := getWorkflowStartedEvent(e.historyMgr, e.historyV2Mgr, msBuilder.GetEventStoreVersion(), msBuilder.GetCurrentBranch(), e.logger, domainID, workflowExecution.GetWorkflowId(), workflowExecution.GetRunId())
+					startEvent, err := getWorkflowStartedEvent(e.historyMgr, e.historyV2Mgr, msBuilder.GetEventStoreVersion(), msBuilder.GetCurrentBranch(), e.logger, domainID, workflowExecution.GetWorkflowId(), workflowExecution.GetRunId(), common.IntPtr(e.shard.GetShardID()))
 					if err != nil {
 						return nil, err
 					}
@@ -1448,7 +1448,7 @@ Update_History_Loop:
 					}
 				} else {
 					// retry or cron with backoff
-					startEvent, err := getWorkflowStartedEvent(e.historyMgr, e.historyV2Mgr, msBuilder.GetEventStoreVersion(), msBuilder.GetCurrentBranch(), e.logger, domainID, workflowExecution.GetWorkflowId(), workflowExecution.GetRunId())
+					startEvent, err := getWorkflowStartedEvent(e.historyMgr, e.historyV2Mgr, msBuilder.GetEventStoreVersion(), msBuilder.GetCurrentBranch(), e.logger, domainID, workflowExecution.GetWorkflowId(), workflowExecution.GetRunId(), common.IntPtr(e.shard.GetShardID()))
 					if err != nil {
 						return nil, err
 					}
@@ -2974,6 +2974,7 @@ func (e *historyEngineImpl) deleteEvents(domainID string, execution workflow.Wor
 	if eventStoreVersion == persistence.EventStoreVersionV2 {
 		e.historyV2Mgr.DeleteHistoryBranch(&persistence.DeleteHistoryBranchRequest{
 			BranchToken: branchToken,
+			ShardID:     common.IntPtr(e.shard.GetShardID()),
 		})
 	} else {
 		e.historyMgr.DeleteWorkflowExecutionHistory(&persistence.DeleteWorkflowExecutionHistoryRequest{
@@ -3444,7 +3445,7 @@ func getStartRequest(domainID string,
 	return startRequest
 }
 
-func getWorkflowStartedEvent(historyMgr persistence.HistoryManager, historyV2Mgr persistence.HistoryV2Manager, eventStoreVersion int32, branchToken []byte, logger bark.Logger, domainID, workflowID, runID string) (*workflow.HistoryEvent, error) {
+func getWorkflowStartedEvent(historyMgr persistence.HistoryManager, historyV2Mgr persistence.HistoryV2Manager, eventStoreVersion int32, branchToken []byte, logger bark.Logger, domainID, workflowID, runID string, shardID *int) (*workflow.HistoryEvent, error) {
 	var events []*workflow.HistoryEvent
 	if eventStoreVersion == persistence.EventStoreVersionV2 {
 		response, err := historyV2Mgr.ReadHistoryBranch(&persistence.ReadHistoryBranchRequest{
@@ -3453,6 +3454,7 @@ func getWorkflowStartedEvent(historyMgr persistence.HistoryManager, historyV2Mgr
 			MaxEventID:    common.FirstEventID + 1,
 			PageSize:      defaultHistoryPageSize,
 			NextPageToken: nil,
+			ShardID:       shardID,
 		})
 		if err != nil {
 			logger.WithFields(bark.Fields{

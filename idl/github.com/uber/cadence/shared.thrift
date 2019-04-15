@@ -1258,6 +1258,7 @@ struct TaskListStatus {
   10: optional i64 (js.type = "Long") backlogCountHint
   20: optional i64 (js.type = "Long") readLevel
   30: optional i64 (js.type = "Long") ackLevel
+  35: optional double ratePerSecond
   40: optional TaskIDBlock taskIDBlock
 }
 
@@ -1301,6 +1302,7 @@ struct PollerInfo {
   // Unix Nano
   10: optional i64 (js.type = "Long")  lastAccessTime
   20: optional string identity
+  30: optional double ratePerSecond
 }
 
 struct RetryPolicy {
