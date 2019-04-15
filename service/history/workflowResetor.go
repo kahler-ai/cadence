@@ -87,7 +87,7 @@ func (w *workflowResetorImpl) ResetWorkflowExecution(ctx context.Context, reques
 	}
 
 	newMutableState, newTransferTasks, newTimerTasks, retError := w.buildNewMutableStateForReset(
-		ctx, baseMutableState, currMutableState,
+		ctx, domainEntry, baseMutableState, currMutableState,
 		request.GetReason(), request.GetDecisionFinishEventId(), request.GetRequestId(), resetNewRunID,
 	)
 	// complete the fork process at the end, it is OK even if this defer fails, because our timer task can still clean up correctly
@@ -254,7 +254,7 @@ func (w *workflowResetorImpl) scheduleUnstartedActivities(msBuilder mutableState
 }
 
 func (w *workflowResetorImpl) buildNewMutableStateForReset(
-	ctx context.Context, baseMutableState, currMutableState mutableState,
+	ctx context.Context, domainEntry *cache.DomainCacheEntry, baseMutableState, currMutableState mutableState,
 	resetReason string, resetDecisionCompletedEventID int64, requestedID, newRunID string,
 ) (newMutableState mutableState, newTransferTasks, newTimerTasks []persistence.Task, retError error) {
 
@@ -274,6 +274,11 @@ func (w *workflowResetorImpl) buildNewMutableStateForReset(
 	retError = validateResetWorkflowAfterReplay(newMutableState)
 	if retError != nil {
 		return
+	}
+
+	// set the new mutable state with the version in domain
+	if newMutableState.GetReplicationState() != nil {
+		newMutableState.UpdateReplicationStateVersion(domainEntry.GetFailoverVersion(), false)
 	}
 
 	// failed the in-flight decision(started).
