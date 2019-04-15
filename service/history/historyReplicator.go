@@ -1272,7 +1272,6 @@ func (r *historyReplicator) reapplyEventsToCurrentClosedWorkflow(
 		return err
 	}
 
-	resetNewRunID := uuid.New()
 	resetRequestID := uuid.New()
 	// workflow event buffer guarantee that the event immediately
 	// after the decision task started is decision task finished event
@@ -1282,26 +1281,19 @@ func (r *historyReplicator) reapplyEventsToCurrentClosedWorkflow(
 	baseMutableState := msBuilder
 	currContext := context
 	currMutableState := msBuilder
-	currPrevRunVersion := msBuilder.GetLastWriteVersion()
-	currTerminated := false
-	currCloseTask := (persistence.Task)(nil)
-	currCleanupTask := (persistence.Task)(nil)
-
-	err = r.resetor.resetWorkflowExecution(
+	resp, err := r.resetor.ResetWorkflowExecution(
 		ctx,
-		domainEntry,
-		workflowResetReason,
-		resetDecisionID,
-		resetRequestID,
-		resetNewRunID,
+		&shared.ResetWorkflowExecutionRequest{
+			Domain:                common.StringPtr(domainEntry.GetInfo().Name),
+			WorkflowExecution:     context.getExecution(),
+			Reason:                common.StringPtr(workflowResetReason),
+			DecisionFinishEventId: common.Int64Ptr(resetDecisionID),
+			RequestId:             common.StringPtr(resetRequestID),
+		},
 		baseContext,
 		baseMutableState,
 		currContext,
 		currMutableState,
-		currPrevRunVersion,
-		currTerminated,
-		currCloseTask,
-		currCleanupTask,
 	)
 	if err != nil {
 		return err
@@ -1309,7 +1301,7 @@ func (r *historyReplicator) reapplyEventsToCurrentClosedWorkflow(
 
 	resetNewExecution := shared.WorkflowExecution{
 		WorkflowId: common.StringPtr(workflowID),
-		RunId:      common.StringPtr(resetNewRunID),
+		RunId:      common.StringPtr(resp.GetRunId()),
 	}
 	resetNewContext, resetNewRelease, err := r.historyCache.getOrCreateWorkflowExecutionWithTimeout(
 		ctx, domainID, resetNewExecution,

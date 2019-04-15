@@ -26,35 +26,19 @@ import (
 	"time"
 
 	"github.com/pborman/uuid"
-	"github.com/uber-common/bark"
 	h "github.com/uber/cadence/.gen/go/history"
 	workflow "github.com/uber/cadence/.gen/go/shared"
 	"github.com/uber/cadence/common"
 	"github.com/uber/cadence/common/cache"
 	ce "github.com/uber/cadence/common/errors"
-	"github.com/uber/cadence/common/logging"
 	"github.com/uber/cadence/common/persistence"
 )
 
 type (
 	workflowResetor interface {
-		ResetWorkflowExecution(ctx context.Context, resetRequest *h.ResetWorkflowExecutionRequest) (response *workflow.ResetWorkflowExecutionResponse, retError error)
-		resetWorkflowExecution(
-			ctx context.Context,
-			domainEntry *cache.DomainCacheEntry,
-			resetReason string,
-			resetDecisionID int64,
-			resetRequestID string,
-			resetNewRunID string,
-			baseContext workflowExecutionContext,
-			baseMutableState mutableState,
-			currContext workflowExecutionContext,
-			currMutableState mutableState,
-			currPrevRunVersion int64,
-			currTerminated bool,
-			currCloseTask persistence.Task,
-			currCleanupTask persistence.Task,
-		) error
+		ResetWorkflowExecution(ctx context.Context, resetRequest *workflow.ResetWorkflowExecutionRequest,
+			baseContext workflowExecutionContext, baseMutableState mutableState,
+			currContext workflowExecutionContext, currMutableState mutableState) (response *workflow.ResetWorkflowExecutionResponse, retError error)
 		ApplyResetEvent(ctx context.Context, request *h.ReplicateEventsRequest, domainID, workflowID, currentRunID string) (retError error)
 	}
 
@@ -75,123 +59,27 @@ func newWorkflowResetor(historyEngine *historyEngineImpl, repl *historyReplicato
 
 // ResetWorkflowExecution only allows resetting to decisionTaskCompleted, but exclude that batch of decisionTaskCompleted/decisionTaskFailed/decisionTaskTimeout.
 // It will then fail the decision with cause of "reset_workflow"
-func (w *workflowResetorImpl) ResetWorkflowExecution(ctx context.Context, resetRequest *h.ResetWorkflowExecutionRequest) (response *workflow.ResetWorkflowExecutionResponse, retError error) {
-	domainEntry, retError := w.eng.getActiveDomainEntry(resetRequest.DomainUUID)
+func (w *workflowResetorImpl) ResetWorkflowExecution(ctx context.Context, request *workflow.ResetWorkflowExecutionRequest,
+	baseContext workflowExecutionContext, baseMutableState mutableState,
+	currContext workflowExecutionContext, currMutableState mutableState) (response *workflow.ResetWorkflowExecutionResponse, retError error) {
+
+	domainEntry, retError := w.eng.shard.GetDomainCache().GetDomain(request.GetDomain())
 	if retError != nil {
 		return
 	}
-	domainID := domainEntry.GetInfo().ID
 
-	request := resetRequest.ResetRequest
-	if request == nil || request.WorkflowExecution == nil || len(request.WorkflowExecution.GetRunId()) == 0 || len(request.WorkflowExecution.GetWorkflowId()) == 0 {
-		retError = &workflow.BadRequestError{
-			Message: fmt.Sprintf("Require workflowId and runId."),
-		}
-		return
-	}
-	if request.GetDecisionFinishEventId() <= common.FirstEventID {
-		retError = &workflow.BadRequestError{
-			Message: fmt.Sprintf("Decision finish ID must be > 1."),
-		}
-		return
-	}
-	baseExecution := workflow.WorkflowExecution{
-		WorkflowId: request.WorkflowExecution.WorkflowId,
-		RunId:      request.WorkflowExecution.RunId,
-	}
-	newRunID := uuid.New()
+	resetNewRunID := uuid.New()
 	response = &workflow.ResetWorkflowExecutionResponse{
-		RunId: common.StringPtr(newRunID),
-	}
-
-	baseContext, baseRelease, retError := w.eng.historyCache.getOrCreateWorkflowExecutionWithTimeout(ctx, domainID, baseExecution)
-	if retError != nil {
-		return
-	}
-	defer func() { baseRelease(retError) }()
-	baseMutableState, retError := baseContext.loadWorkflowExecution()
-	if retError != nil {
-		return
-	}
-
-	// also load the current run of the workflow, it can be different from the base runID
-	resp, retError := w.eng.shard.GetExecutionManager().GetCurrentExecution(&persistence.GetCurrentExecutionRequest{
-		DomainID:   domainID,
-		WorkflowID: request.WorkflowExecution.GetWorkflowId(),
-	})
-	if retError != nil {
-		return
-	}
-	var currMutableState mutableState
-	var currContext workflowExecutionContext
-	var currExecution workflow.WorkflowExecution
-	if resp.RunID == baseExecution.GetRunId() {
-		currContext = baseContext
-		currMutableState = baseMutableState
-		currExecution = baseExecution
-	} else {
-		currExecution = workflow.WorkflowExecution{
-			WorkflowId: request.WorkflowExecution.WorkflowId,
-			RunId:      common.StringPtr(resp.RunID),
-		}
-		var currRelease func(err error)
-		currContext, currRelease, retError = w.eng.historyCache.getOrCreateWorkflowExecutionWithTimeout(ctx, domainID, currExecution)
-		if retError != nil {
-			return
-		}
-		defer func() { currRelease(retError) }()
-		currMutableState, retError = currContext.loadWorkflowExecution()
-		if retError != nil {
-			return
-		}
-	}
-	// dedup by requestID
-	if currMutableState.GetExecutionInfo().CreateRequestID == request.GetRequestId() {
-		response.RunId = currExecution.RunId
-		w.eng.logger.WithFields(bark.Fields{
-			logging.TagDomainID:            domainID,
-			logging.TagWorkflowExecutionID: currExecution.GetWorkflowId(),
-			logging.TagWorkflowRunID:       currExecution.GetRunId(),
-		}).Info("Duplicated reset request")
-		return
+		RunId: common.StringPtr(uuid.New()),
 	}
 
 	// before changing mutable state
 	currPrevRunVersion := currMutableState.GetLastWriteVersion()
 	// terminate the current run if it is running
-	currTerminated, currCloseTask, currCleanupTask, retError := w.terminateIfCurrIsRunning(currMutableState, request.GetReason(), currExecution)
+	currTerminated, currCloseTask, currCleanupTask, retError := w.terminateIfCurrIsRunning(currMutableState, request.GetReason())
 	if retError != nil {
 		return
 	}
-
-	retError = w.resetWorkflowExecution(
-		ctx, domainEntry,
-		request.GetReason(), request.GetDecisionFinishEventId(),
-		request.GetRequestId(), newRunID,
-		baseContext, baseMutableState,
-		currContext, currMutableState,
-		currPrevRunVersion, currTerminated,
-		currCloseTask, currCleanupTask,
-	)
-	return
-}
-
-func (w *workflowResetorImpl) resetWorkflowExecution(
-	ctx context.Context,
-	domainEntry *cache.DomainCacheEntry,
-	resetReason string,
-	resetDecisionID int64,
-	resetRequestID string,
-	resetNewRunID string,
-	baseContext workflowExecutionContext,
-	baseMutableState mutableState,
-	currContext workflowExecutionContext,
-	currMutableState mutableState,
-	currPrevRunVersion int64,
-	currTerminated bool,
-	currCloseTask persistence.Task,
-	currCleanupTask persistence.Task,
-) (retError error) {
 
 	retError = validateResetWorkflowBeforeReplay(baseMutableState, currMutableState)
 	if retError != nil {
@@ -200,7 +88,7 @@ func (w *workflowResetorImpl) resetWorkflowExecution(
 
 	newMutableState, newTransferTasks, newTimerTasks, retError := w.buildNewMutableStateForReset(
 		ctx, baseMutableState, currMutableState,
-		resetReason, resetDecisionID, resetRequestID, resetNewRunID,
+		request.GetReason(), request.GetDecisionFinishEventId(), request.GetRequestId(), resetNewRunID,
 	)
 	// complete the fork process at the end, it is OK even if this defer fails, because our timer task can still clean up correctly
 	defer func() {
@@ -453,7 +341,9 @@ func (w *workflowResetorImpl) buildNewMutableStateForReset(
 	return
 }
 
-func (w *workflowResetorImpl) terminateIfCurrIsRunning(currMutableState mutableState, reason string, currExecution workflow.WorkflowExecution) (terminateCurr bool, closeTask, cleanupTask persistence.Task, retError error) {
+func (w *workflowResetorImpl) terminateIfCurrIsRunning(currMutableState mutableState,
+	reason string) (terminateCurr bool, closeTask, cleanupTask persistence.Task, retError error) {
+
 	if currMutableState.IsWorkflowExecutionRunning() {
 		terminateCurr = true
 
@@ -469,8 +359,11 @@ func (w *workflowResetorImpl) terminateIfCurrIsRunning(currMutableState mutableS
 		})
 		closeTask, cleanupTask, retError = w.eng.getWorkflowHistoryCleanupTasks(
 			currMutableState.GetExecutionInfo().DomainID,
-			currExecution.GetWorkflowId(),
-			w.eng.getTimerBuilder(&currExecution))
+			currMutableState.GetExecutionInfo().WorkflowID,
+			w.eng.getTimerBuilder(&workflow.WorkflowExecution{
+				WorkflowId: common.StringPtr(currMutableState.GetExecutionInfo().WorkflowID),
+				RunId:      common.StringPtr(currMutableState.GetExecutionInfo().RunID),
+			}))
 		if retError != nil {
 			return
 		}
