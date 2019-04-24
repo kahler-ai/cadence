@@ -1308,6 +1308,9 @@ func (r *historyReplicator) reapplyEventsToCurrentClosedWorkflow(
 		currMutableState,
 	)
 	if err != nil {
+		if _, ok := err.(*shared.DomainNotActiveError); ok {
+			return nil
+		}
 		return err
 	}
 
