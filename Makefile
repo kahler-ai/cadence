@@ -19,6 +19,7 @@ THRIFTRW_SRCS = \
   idl/github.com/uber/cadence/indexer.thrift \
   idl/github.com/uber/cadence/shared.thrift \
   idl/github.com/uber/cadence/admin.thrift \
+  idl/github.com/uber/cadence/sqlblobs.thrift \
 
 PROGS = cadence
 TEST_ARG ?= -race -v -timeout 40m
@@ -35,6 +36,10 @@ endif
 
 ifndef PERSISTENCE_TYPE
 override PERSISTENCE_TYPE = cassandra
+endif
+
+ifdef TEST_TAG
+override TEST_TAG := -tags $(TEST_TAG)
 endif
 
 define thriftrwrule
@@ -106,7 +111,7 @@ test: dep-ensured bins
 	@rm -f test
 	@rm -f test.log
 	@for dir in $(TEST_DIRS); do \
-		go test -timeout 20m -race -coverprofile=$@ "$$dir" | tee -a test.log; \
+		go test -timeout 20m -race -coverprofile=$@ "$$dir" $(TEST_TAG) | tee -a test.log; \
 	done;
 
 test_eventsV2: dep-ensured bins
@@ -114,7 +119,7 @@ test_eventsV2: dep-ensured bins
 	@rm -f test_eventsV2.log
 	@echo Running integration test
 	@for dir in $(INTEG_TEST_ROOT); do \
-    		go test -timeout 20m -coverprofile=$@ "$$dir" -v -eventsV2=true | tee -a test_eventsV2.log; \
+    		go test -timeout 20m -coverprofile=$@ "$$dir" -v $(TEST_TAG) -eventsV2=true | tee -a test_eventsV2.log; \
     done;
 
 test_eventsV2_xdc: dep-ensured bins
@@ -150,7 +155,7 @@ cover_integration_profile: clean bins_nothrift
 
 	@echo Running integration test with $(PERSISTENCE_TYPE) and eventsV2 $(EVENTSV2)
 	@mkdir -p $(BUILD)/$(INTEG_TEST_DIR)
-	@time go test $(INTEG_TEST_ROOT) $(TEST_ARG) -eventsV2=$(EVENTSV2) -persistenceType=$(PERSISTENCE_TYPE) $(GOCOVERPKG_ARG) -coverprofile=$(BUILD)/$(INTEG_TEST_DIR)/coverage.out || exit 1;
+	@time go test $(INTEG_TEST_ROOT) $(TEST_ARG) $(TEST_TAG) -eventsV2=$(EVENTSV2) -persistenceType=$(PERSISTENCE_TYPE) $(GOCOVERPKG_ARG) -coverprofile=$(BUILD)/$(INTEG_TEST_DIR)/coverage.out || exit 1;
 	@cat $(BUILD)/$(INTEG_TEST_DIR)/coverage.out | grep -v "mode: atomic" >> $(BUILD)/cover.out
 
 cover_xdc_profile: clean bins_nothrift

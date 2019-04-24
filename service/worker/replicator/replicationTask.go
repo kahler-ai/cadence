@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/dgryski/go-farm"
-	"github.com/uber-common/bark"
 	h "github.com/uber/cadence/.gen/go/history"
 	"github.com/uber/cadence/.gen/go/replicator"
 	"github.com/uber/cadence/.gen/go/shared"
@@ -33,7 +32,8 @@ import (
 	"github.com/uber/cadence/common"
 	"github.com/uber/cadence/common/definition"
 	"github.com/uber/cadence/common/locks"
-	"github.com/uber/cadence/common/logging"
+	"github.com/uber/cadence/common/log"
+	"github.com/uber/cadence/common/log/tag"
 	"github.com/uber/cadence/common/messaging"
 	"github.com/uber/cadence/common/metrics"
 	"github.com/uber/cadence/common/xdc"
@@ -47,7 +47,7 @@ type (
 		taskID       int64
 		attempt      int
 		kafkaMsg     messaging.Message
-		logger       bark.Logger
+		logger       log.Logger
 
 		config              *Config
 		historyClient       history.Client
@@ -65,17 +65,30 @@ type (
 		workflowReplicationTask
 		req *h.ReplicateEventsRequest
 	}
+
+	historyMetadataReplicationTask struct {
+		workflowReplicationTask
+		sourceCluster string
+		firstEventID  int64
+		nextEventID   int64
+	}
 )
 
 const (
 	replicationTaskRetryDelay = 500 * time.Microsecond
 )
 
-func newActivityReplicationTask(task *replicator.ReplicationTask, msg messaging.Message, logger bark.Logger,
+func newActivityReplicationTask(task *replicator.ReplicationTask, msg messaging.Message, logger log.Logger,
 	config *Config, historyClient history.Client, metricsClient metrics.Client,
 	historyRereplicator xdc.HistoryRereplicator) *activityReplicationTask {
 
 	attr := task.SyncActicvityTaskAttributes
+
+	logger = logger.WithTags(tag.WorkflowDomainID(attr.GetDomainId()),
+		tag.WorkflowID(attr.GetWorkflowId()),
+		tag.WorkflowRunID(attr.GetRunId()),
+		tag.WorkflowEventID(attr.GetScheduledId()),
+		tag.FailoverVersion(attr.GetVersion()))
 	return &activityReplicationTask{
 		workflowReplicationTask: workflowReplicationTask{
 			metricsScope: metrics.SyncActivityTaskScope,
@@ -83,16 +96,10 @@ func newActivityReplicationTask(task *replicator.ReplicationTask, msg messaging.
 			partitionID: definition.NewWorkflowIdentifier(
 				attr.GetDomainId(), attr.GetWorkflowId(), attr.GetRunId(),
 			),
-			taskID:   attr.GetScheduledId(),
-			attempt:  0,
-			kafkaMsg: msg,
-			logger: logger.WithFields(bark.Fields{
-				logging.TagDomainID:            attr.GetDomainId(),
-				logging.TagWorkflowExecutionID: attr.GetWorkflowId(),
-				logging.TagWorkflowRunID:       attr.GetRunId(),
-				logging.TagEventID:             attr.GetScheduledId(),
-				logging.TagVersion:             attr.GetVersion(),
-			}),
+			taskID:              attr.GetScheduledId(),
+			attempt:             0,
+			kafkaMsg:            msg,
+			logger:              logger,
 			config:              config,
 			historyClient:       historyClient,
 			metricsClient:       metricsClient,
@@ -114,11 +121,17 @@ func newActivityReplicationTask(task *replicator.ReplicationTask, msg messaging.
 	}
 }
 
-func newHistoryReplicationTask(task *replicator.ReplicationTask, msg messaging.Message, sourceCluster string, logger bark.Logger,
+func newHistoryReplicationTask(task *replicator.ReplicationTask, msg messaging.Message, sourceCluster string, logger log.Logger,
 	config *Config, historyClient history.Client, metricsClient metrics.Client,
 	historyRereplicator xdc.HistoryRereplicator) *historyReplicationTask {
 
 	attr := task.HistoryTaskAttributes
+	logger = logger.WithTags(tag.WorkflowDomainID(attr.GetDomainId()),
+		tag.WorkflowID(attr.GetWorkflowId()),
+		tag.WorkflowRunID(attr.GetRunId()),
+		tag.WorkflowFirstEventID(attr.GetFirstEventId()),
+		tag.WorkflowNextEventID(attr.GetNextEventId()),
+		tag.FailoverVersion(attr.GetVersion()))
 	return &historyReplicationTask{
 		workflowReplicationTask: workflowReplicationTask{
 			metricsScope: metrics.HistoryReplicationTaskScope,
@@ -126,17 +139,10 @@ func newHistoryReplicationTask(task *replicator.ReplicationTask, msg messaging.M
 			partitionID: definition.NewWorkflowIdentifier(
 				attr.GetDomainId(), attr.GetWorkflowId(), attr.GetRunId(),
 			),
-			taskID:   attr.GetFirstEventId(),
-			attempt:  0,
-			kafkaMsg: msg,
-			logger: logger.WithFields(bark.Fields{
-				logging.TagDomainID:            attr.GetDomainId(),
-				logging.TagWorkflowExecutionID: attr.GetWorkflowId(),
-				logging.TagWorkflowRunID:       attr.GetRunId(),
-				logging.TagFirstEventID:        attr.GetFirstEventId(),
-				logging.TagNextEventID:         attr.GetNextEventId(),
-				logging.TagVersion:             attr.GetVersion(),
-			}),
+			taskID:              attr.GetFirstEventId(),
+			attempt:             0,
+			kafkaMsg:            msg,
+			logger:              logger,
 			config:              config,
 			historyClient:       historyClient,
 			metricsClient:       metricsClient,
@@ -160,6 +166,38 @@ func newHistoryReplicationTask(task *replicator.ReplicationTask, msg messaging.M
 			NewRunEventStoreVersion: attr.NewRunEventStoreVersion,
 			ResetWorkflow:           attr.ResetWorkflow,
 		},
+	}
+}
+
+func newHistoryMetadataReplicationTask(task *replicator.ReplicationTask, msg messaging.Message, sourceCluster string, logger log.Logger,
+	config *Config, historyClient history.Client, metricsClient metrics.Client,
+	historyRereplicator xdc.HistoryRereplicator) *historyMetadataReplicationTask {
+
+	attr := task.HistoryMetadataTaskAttributes
+	logger = logger.WithTags(tag.WorkflowDomainID(attr.GetDomainId()),
+		tag.WorkflowID(attr.GetWorkflowId()),
+		tag.WorkflowRunID(attr.GetRunId()),
+		tag.WorkflowFirstEventID(attr.GetFirstEventId()),
+		tag.WorkflowNextEventID(attr.GetNextEventId()))
+	return &historyMetadataReplicationTask{
+		workflowReplicationTask: workflowReplicationTask{
+			metricsScope: metrics.HistoryReplicationTaskScope,
+			startTime:    time.Now(),
+			partitionID: definition.NewWorkflowIdentifier(
+				attr.GetDomainId(), attr.GetWorkflowId(), attr.GetRunId(),
+			),
+			taskID:              attr.GetFirstEventId(),
+			attempt:             0,
+			kafkaMsg:            msg,
+			logger:              logger,
+			config:              config,
+			historyClient:       historyClient,
+			metricsClient:       metricsClient,
+			historyRereplicator: historyRereplicator,
+		},
+		sourceCluster: sourceCluster,
+		firstEventID:  attr.GetFirstEventId(),
+		nextEventID:   attr.GetNextEventId(),
 	}
 }
 
@@ -190,7 +228,7 @@ func (t *activityReplicationTask) HandleErr(err error) error {
 	)
 
 	if resendErr != nil {
-		t.logger.WithField(logging.TagErr, resendErr).Error("error resend history")
+		t.logger.Error("error resend history", tag.Error(resendErr))
 		// should return the replication error, not the resending error
 		return err
 	}
@@ -234,7 +272,7 @@ func (t *historyReplicationTask) HandleErr(err error) error {
 		beginRunID, beginEventID, endRunID, endEventID,
 	)
 	if resendErr != nil {
-		t.logger.WithField(logging.TagErr, resendErr).Error("error resend history")
+		t.logger.Error("error resend history", tag.Error(resendErr))
 		// should return the replication error, not the resending error
 		return err
 	}
@@ -243,6 +281,56 @@ func (t *historyReplicationTask) HandleErr(err error) error {
 }
 
 func (t *historyReplicationTask) RetryErr(err error) bool {
+	t.attempt++
+
+	if t.attempt <= t.config.ReplicationTaskMaxRetry() && isTransientRetryableError(err) {
+		time.Sleep(replicationTaskRetryDelay)
+		return true
+	}
+	return false
+}
+
+func (t *historyMetadataReplicationTask) Execute() error {
+	t.metricsClient.IncCounter(metrics.HistoryRereplicationByHistoryMetadataReplicationScope, metrics.CadenceClientRequests)
+	stopwatch := t.metricsClient.StartTimer(metrics.HistoryRereplicationByHistoryMetadataReplicationScope, metrics.CadenceClientLatency)
+	defer stopwatch.Stop()
+
+	return t.historyRereplicator.SendMultiWorkflowHistory(
+		t.partitionID.DomainID, t.partitionID.WorkflowID,
+		t.partitionID.RunID, t.firstEventID,
+		t.partitionID.RunID, t.nextEventID,
+	)
+}
+
+func (t *historyMetadataReplicationTask) HandleErr(err error) error {
+	retryErr, ok := t.convertRetryTaskError(err)
+	if !ok || retryErr.GetRunId() == "" {
+		return err
+	}
+
+	t.metricsClient.IncCounter(metrics.HistoryRereplicationByHistoryReplicationScope, metrics.CadenceClientRequests)
+	stopwatch := t.metricsClient.StartTimer(metrics.HistoryRereplicationByHistoryReplicationScope, metrics.CadenceClientLatency)
+	defer stopwatch.Stop()
+
+	// this is the retry error
+	beginRunID := retryErr.GetRunId()
+	beginEventID := retryErr.GetNextEventId()
+	endRunID := t.partitionID.RunID
+	endEventID := t.taskID
+	resendErr := t.historyRereplicator.SendMultiWorkflowHistory(
+		t.partitionID.DomainID, t.partitionID.WorkflowID,
+		beginRunID, beginEventID, endRunID, endEventID,
+	)
+	if resendErr != nil {
+		t.logger.Error("error resend history", tag.Error(resendErr))
+		// should return the replication error, not the resending error
+		return err
+	}
+	// should try again
+	return t.Execute()
+}
+
+func (t *historyMetadataReplicationTask) RetryErr(err error) bool {
 	t.attempt++
 
 	if t.attempt <= t.config.ReplicationTaskMaxRetry() && isTransientRetryableError(err) {

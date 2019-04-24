@@ -77,6 +77,12 @@ exception RetryTaskError {
   5: optional i64 (js.type = "Long") nextEventId
 }
 
+exception ClientVersionNotSupportedError {
+  1: required string featureVersion
+  2: required string clientImpl
+  3: required string supportedVersions
+}
+
 enum WorkflowIdReusePolicy {
   /*
    * allow start a workflow execution using the same workflow ID,
@@ -293,6 +299,10 @@ struct WorkflowExecution {
   20: optional string runId
 }
 
+struct Memo {
+  10: optional map<string,binary> fields
+}
+
 struct WorkflowExecutionInfo {
   10: optional WorkflowExecution execution
   20: optional WorkflowType type
@@ -303,6 +313,7 @@ struct WorkflowExecutionInfo {
   70: optional string parentDomainId
   80: optional WorkflowExecution parentExecution
   90: optional i64 (js.type = "Long") executionTime
+  100: optional Memo memo
 }
 
 struct WorkflowExecutionConfiguration {
@@ -446,6 +457,7 @@ struct WorkflowExecutionStartedEventAttributes {
   90: optional i64 (js.type = "Long") expirationTimestamp
   100: optional string cronSchedule
   110: optional i32 firstDecisionTaskBackoffSeconds
+  120: optional Memo memo
 }
 
 struct WorkflowExecutionCompletedEventAttributes {
@@ -943,6 +955,7 @@ struct StartWorkflowExecutionRequest {
   110: optional ChildPolicy childPolicy
   120: optional RetryPolicy retryPolicy
   130: optional string cronSchedule
+  140: optional Memo memo
 }
 
 struct StartWorkflowExecutionResponse {
@@ -1135,6 +1148,7 @@ struct SignalWithStartWorkflowExecutionRequest {
   130: optional binary control
   140: optional RetryPolicy retryPolicy
   150: optional string cronSchedule
+  160: optional Memo memo
 }
 
 struct TerminateWorkflowExecutionRequest {
