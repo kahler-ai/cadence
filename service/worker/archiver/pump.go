@@ -69,7 +69,7 @@ func NewPump(
 		logger:        logger,
 		metricsClient: metricsClient,
 		carryover:     carryover,
-		timeout:       timeout,
+		timeout:       10 * time.Minute,
 		requestLimit:  requestLimit,
 		requestCh:     requestCh,
 		signalCh:      signalCh,
