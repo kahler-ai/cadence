@@ -360,8 +360,11 @@ func (e *historyEngineImpl) generateFirstDecisionTask(domainID string, msBuilder
 // StartWorkflowExecution starts a workflow execution
 func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest *h.StartWorkflowExecutionRequest) (
 	resp *workflow.StartWorkflowExecutionResponse, retError error) {
+
+	e.logger.Info("andrew history StartWorkflowExecution 0")
 	domainEntry, retError := e.getActiveDomainEntry(startRequest.DomainUUID)
 	if retError != nil {
+		e.logger.Info("andrew history StartWorkflowExecution 1", tag.Error(retError))
 		return
 	}
 	domainID := domainEntry.GetInfo().ID
@@ -369,9 +372,11 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 	request := startRequest.StartRequest
 	retError = validateStartWorkflowExecutionRequest(request, e.config.MaxIDLengthLimit())
 	if retError != nil {
+		e.logger.Info("andrew history StartWorkflowExecution 2", tag.Error(retError))
 		return
 	}
 
+	e.logger.Info("andrew history StartWorkflowExecution 3", tag.Error(retError))
 	execution := workflow.WorkflowExecution{
 		WorkflowId: request.WorkflowId,
 		RunId:      common.StringPtr(uuid.New()),
@@ -382,24 +387,29 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 	if e.config.EnableEventsV2(request.GetDomain()) {
 		eventStoreVersion = persistence.EventStoreVersionV2
 	}
+	e.logger.Info("andrew history StartWorkflowExecution 4", tag.Error(retError))
 	if eventStoreVersion == persistence.EventStoreVersionV2 {
 		// NOTE: except for fork(reset), we use runID as treeID for simplicity
 		if retError = msBuilder.SetHistoryTree(*execution.RunId); retError != nil {
 			return
 		}
 	}
+	e.logger.Info("andrew history StartWorkflowExecution 5", tag.Error(retError))
 
 	startedEvent := msBuilder.AddWorkflowExecutionStartedEvent(execution, startRequest)
 	if startedEvent == nil {
 		retError = &workflow.InternalServiceError{Message: "Failed to add workflow execution started event."}
+		e.logger.Info("andrew history StartWorkflowExecution 6", tag.Error(retError))
 		return
 	}
 
+	e.logger.Info("andrew history StartWorkflowExecution 7", tag.Error(retError))
 	taskList := request.TaskList.GetName()
 	cronBackoffSeconds := startRequest.GetFirstDecisionTaskBackoffSeconds()
 	// Generate first decision task event if not child WF and no first decision task backoff
 	transferTasks, _, retError := e.generateFirstDecisionTask(domainID, msBuilder, startRequest.ParentExecutionInfo, taskList, cronBackoffSeconds)
 	if retError != nil {
+		e.logger.Info("andrew history StartWorkflowExecution 8", tag.Error(retError))
 		return
 	}
 
@@ -410,6 +420,7 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 		VisibilityTimestamp: e.shard.GetTimeSource().Now().Add(timeoutDuration),
 	}}
 
+	e.logger.Info("andrew history StartWorkflowExecution 9", tag.Error(retError))
 	// Only schedule the backoff timer task if not child WF and there's first decision task backoff
 	if cronBackoffSeconds != 0 && startRequest.ParentExecutionInfo == nil {
 		timerTasks = append(timerTasks, &persistence.WorkflowBackoffTimerTask{
@@ -418,18 +429,21 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 		})
 	}
 
+	e.logger.Info("andrew history StartWorkflowExecution 10", tag.Error(retError))
 	context := newWorkflowExecutionContext(domainID, execution, e.shard, e.executionManager, e.logger)
 	createReplicationTask := domainEntry.CanReplicateEvent()
 	replicationTasks := []persistence.Task{}
 	var replicationTask persistence.Task
 	_, replicationTask, retError = context.appendFirstBatchEventsForActive(msBuilder, createReplicationTask)
 	if retError != nil {
+		e.logger.Info("andrew history StartWorkflowExecution 11", tag.Error(retError))
 		return
 	}
 	if replicationTask != nil {
 		replicationTasks = append(replicationTasks, replicationTask)
 	}
 
+	e.logger.Info("andrew history StartWorkflowExecution 12", tag.Error(retError))
 	// delete history if createWorkflow failed, otherwise history will leak
 	shouldDeleteHistory := true
 	defer func() {
@@ -437,6 +451,7 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 			e.deleteEvents(domainID, execution, eventStoreVersion, msBuilder.GetCurrentBranch())
 		}
 	}()
+	e.logger.Info("andrew history StartWorkflowExecution 13", tag.Error(retError))
 
 	// create as brand new
 	createMode := persistence.CreateWorkflowModeBrandNew
@@ -448,47 +463,59 @@ func (e *historyEngineImpl) StartWorkflowExecution(ctx ctx.Context, startRequest
 		createMode, prevRunID, prevLastWriteVersion,
 	)
 	if retError != nil {
+		e.logger.Info("andrew history StartWorkflowExecution 14", tag.Error(retError))
 		t, ok := retError.(*persistence.WorkflowExecutionAlreadyStartedError)
 		if ok {
+			e.logger.Info("andrew history StartWorkflowExecution 15", tag.Error(retError))
 			if t.StartRequestID == *request.RequestId {
+				e.logger.Info("andrew history StartWorkflowExecution 16", tag.Error(retError))
 				return &workflow.StartWorkflowExecutionResponse{
 					RunId: common.StringPtr(t.RunID),
 				}, nil
 				// delete history is expected here because duplicate start request will create history with different rid
 			}
 
+			e.logger.Info("andrew history StartWorkflowExecution 17", tag.Error(retError))
 			if msBuilder.GetCurrentVersion() < t.LastWriteVersion {
+				e.logger.Info("andrew history StartWorkflowExecution 18", tag.Error(retError))
 				retError = ce.NewDomainNotActiveError(
 					*request.Domain,
 					clusterMetadata.GetCurrentClusterName(),
 					clusterMetadata.ClusterNameForFailoverVersion(t.LastWriteVersion),
 				)
+				e.logger.Info("andrew history StartWorkflowExecution 19", tag.Error(retError))
 				return
 			}
 
+			e.logger.Info("andrew history StartWorkflowExecution 20", tag.Error(retError))
 			// create as ID reuse
 			createMode = persistence.CreateWorkflowModeWorkflowIDReuse
 			prevRunID = t.RunID
 			prevLastWriteVersion = t.LastWriteVersion
 			retError = e.applyWorkflowIDReusePolicyHelper(t.StartRequestID, prevRunID, t.State, t.CloseStatus, domainID, execution, startRequest.StartRequest.GetWorkflowIdReusePolicy())
 			if retError != nil {
+				e.logger.Info("andrew history StartWorkflowExecution 21", tag.Error(retError))
 				return
 			}
+			e.logger.Info("andrew history StartWorkflowExecution 22", tag.Error(retError))
 			retError = context.createWorkflowExecution(
 				msBuilder, e.currentClusterName, createReplicationTask, time.Now(),
 				transferTasks, replicationTasks, timerTasks,
 				createMode, prevRunID, prevLastWriteVersion,
 			)
+			e.logger.Info("andrew history StartWorkflowExecution 23", tag.Error(retError))
 		}
 	}
 
 	if retError == nil || persistence.IsTimeoutError(retError) {
+		e.logger.Info("andrew history StartWorkflowExecution 24", tag.Error(retError))
 		shouldDeleteHistory = false
 		e.timerProcessor.NotifyNewTimers(e.currentClusterName, e.shard.GetCurrentTime(e.currentClusterName), timerTasks)
 		return &workflow.StartWorkflowExecutionResponse{
 			RunId: execution.RunId,
 		}, retError
 	}
+	e.logger.Info("andrew history StartWorkflowExecution 25", tag.Error(retError))
 	return
 }
 
