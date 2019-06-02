@@ -1470,45 +1470,55 @@ func (wh *WorkflowHandler) RespondQueryTaskCompleted(
 func (wh *WorkflowHandler) StartWorkflowExecution(
 	ctx context.Context,
 	startRequest *gen.StartWorkflowExecutionRequest) (resp *gen.StartWorkflowExecutionResponse, retError error) {
+	wh.GetLogger().Info("andrew here 0")
 	defer log.CapturePanic(wh.GetLogger(), &retError)
 
 	scope, sw := wh.startRequestProfileWithDomain(metrics.FrontendStartWorkflowExecutionScope, startRequest)
 	defer sw.Stop()
 
 	if err := wh.versionChecker.checkClientVersion(ctx); err != nil {
+		wh.GetLogger().Info("andrew here 1", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
 
 	if startRequest == nil {
+		wh.GetLogger().Info("andrew here 2")
 		return nil, wh.error(errRequestNotSet, scope)
 	}
 
 	if ok, _ := wh.rateLimiter.TryConsume(1); !ok {
+		wh.GetLogger().Info("andrew here 3")
 		return nil, wh.error(createServiceBusyError(), scope)
 	}
 
 	domainName := startRequest.GetDomain()
 	if domainName == "" {
+		wh.GetLogger().Info("andrew here 4")
 		return nil, wh.error(errDomainNotSet, scope)
 	}
 
 	if len(domainName) > wh.config.MaxIDLengthLimit() {
+		wh.GetLogger().Info("andrew here 5")
 		return nil, wh.error(errDomainTooLong, scope)
 	}
 
 	if startRequest.GetWorkflowId() == "" {
+		wh.GetLogger().Info("andrew here 6")
 		return nil, wh.error(errWorkflowIDNotSet, scope)
 	}
 
 	if len(startRequest.GetWorkflowId()) > wh.config.MaxIDLengthLimit() {
+		wh.GetLogger().Info("andrew here 7")
 		return nil, wh.error(errWorkflowIDTooLong, scope)
 	}
 
 	if err := common.ValidateRetryPolicy(startRequest.RetryPolicy); err != nil {
+		wh.GetLogger().Info("andrew here 8", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
 
 	if err := cron.ValidateSchedule(startRequest.GetCronSchedule()); err != nil {
+		wh.GetLogger().Info("andrew here 9", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
 
@@ -1517,34 +1527,42 @@ func (wh *WorkflowHandler) StartWorkflowExecution(
 		tag.WorkflowID(startRequest.GetWorkflowId()))
 
 	if startRequest.WorkflowType == nil || startRequest.WorkflowType.GetName() == "" {
+		wh.GetLogger().Info("andrew here 10")
 		return nil, wh.error(errWorkflowTypeNotSet, scope)
 	}
 
 	if len(startRequest.WorkflowType.GetName()) > wh.config.MaxIDLengthLimit() {
+		wh.GetLogger().Info("andrew here 11")
 		return nil, wh.error(errWorkflowTypeTooLong, scope)
 	}
 
 	if err := wh.validateTaskList(startRequest.TaskList, scope); err != nil {
+		wh.GetLogger().Info("andrew here 12", tag.Error(err))
 		return nil, err
 	}
 
 	if startRequest.GetExecutionStartToCloseTimeoutSeconds() <= 0 {
+		wh.GetLogger().Info("andrew here 13")
 		return nil, wh.error(errInvalidExecutionStartToCloseTimeoutSeconds, scope)
 	}
 
 	if startRequest.GetTaskStartToCloseTimeoutSeconds() <= 0 {
+		wh.GetLogger().Info("andrew here 14")
 		return nil, wh.error(errInvalidTaskStartToCloseTimeoutSeconds, scope)
 	}
 
 	if startRequest.GetRequestId() == "" {
+		wh.GetLogger().Info("andrew here 15")
 		return nil, wh.error(errRequestIDNotSet, scope)
 	}
 
 	if len(startRequest.GetRequestId()) > wh.config.MaxIDLengthLimit() {
+		wh.GetLogger().Info("andrew here 16")
 		return nil, wh.error(errRequestIDTooLong, scope)
 	}
 
 	if err := wh.validateSearchAttributes(startRequest.SearchAttributes, domainName); err != nil {
+		wh.GetLogger().Info("andrew here 17")
 		return nil, wh.error(&gen.BadRequestError{Message: err.Error()}, scope)
 	}
 
@@ -1568,6 +1586,7 @@ func (wh *WorkflowHandler) StartWorkflowExecution(
 	}
 	if startRequest.GetTaskStartToCloseTimeoutSeconds() > startRequest.GetExecutionStartToCloseTimeoutSeconds() ||
 		startRequest.GetTaskStartToCloseTimeoutSeconds() > maxDecisionTimeout {
+		wh.GetLogger().Info("andrew here 18")
 		return nil, wh.error(&gen.BadRequestError{
 			Message: fmt.Sprintf("TaskStartToCloseTimeoutSeconds is larger than ExecutionStartToCloseTimeout or MaxDecisionStartToCloseTimeout (%ds).", maxDecisionTimeout)}, scope)
 	}
@@ -1575,6 +1594,7 @@ func (wh *WorkflowHandler) StartWorkflowExecution(
 	wh.Service.GetLogger().Debug("Start workflow execution request domain", tag.WorkflowDomainName(domainName))
 	domainID, err := wh.domainCache.GetDomainID(domainName)
 	if err != nil {
+		wh.GetLogger().Info("andrew here 19", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
 
@@ -1597,6 +1617,7 @@ func (wh *WorkflowHandler) StartWorkflowExecution(
 		scope,
 		wh.GetThrottledLogger(),
 	); err != nil {
+		wh.GetLogger().Info("andrew here 20", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
 
@@ -1604,8 +1625,10 @@ func (wh *WorkflowHandler) StartWorkflowExecution(
 	resp, err = wh.history.StartWorkflowExecution(ctx, common.CreateHistoryStartWorkflowRequest(domainID, startRequest))
 
 	if err != nil {
+		wh.GetLogger().Info("andrew here 21", tag.Error(err))
 		return nil, wh.error(err, scope)
 	}
+	wh.GetLogger().Info("andrew here 22")
 	return resp, nil
 }
 
